@@ -35,7 +35,7 @@ H264MP4Writer::~H264MP4Writer()
     gf_sys_close();
 }
 
-bool H264MP4Writer::init(int width, int height, float frameRate, bool isH265)
+bool H264MP4Writer::init(int width, int height, float frameRate, int isH265)
 {
     if (width <= 0 || height <= 0 || frameRate <= 0) {
         std::cerr << "Invalid parameters: width, height and frameRate must be positive" << std::endl;
@@ -45,7 +45,7 @@ bool H264MP4Writer::init(int width, int height, float frameRate, bool isH265)
     m_width = width;
     m_height = height;
     m_frameRate = frameRate;
-    m_isH265 = isH265;
+    m_isH265 = (isH265 == -1) ? false : (isH265 != 0); // 默认为H264，等待自动检测
     m_hasParameterSets = false;
     
     // 计算采样持续时间 (timescale=1000 表示毫秒)
@@ -189,6 +189,47 @@ bool H264MP4Writer::writeFrame(const uint8_t* frameData, size_t frameSize, bool 
     if (!parseNALU(frameData, frameSize, nalus) || nalus.empty()) {
         std::cerr << "Failed to parse NALUs" << std::endl;
         return false;
+    }
+    
+    // 自动检测编码类型（如果需要）
+    if (!m_hasParameterSets) {
+        // 检查是否需要自动检测
+        bool needDetect = false;
+        if (!m_hasParameterSets) {
+            // 检查第一个NALU的类型来判断是H264还是H265
+            bool isH265Detected = detectCodecType(frameData, frameSize);
+            
+            // 如果检测结果与当前设置不同，更新编码类型
+            if (isH265Detected != m_isH265) {
+                std::cout << "Auto-detected " << (isH265Detected ? "H265" : "H264") << " codec" << std::endl;
+                m_isH265 = isH265Detected;
+                
+                // 如果已经开始录制，需要重新配置编解码器
+                if (m_isRecording) {
+                    GF_Err err;
+                    if (m_isH265) {
+                        // 重新配置为H265编解码器
+                        GF_HEVCConfig *hevc_cfg = gf_odf_hevc_cfg_new();
+                        u32 trackId = m_trackId;
+                        err = gf_isom_hevc_config_new(m_mp4File, m_trackId, hevc_cfg, NULL, NULL, &trackId);
+                        m_trackId = trackId;
+                        gf_odf_hevc_cfg_del(hevc_cfg);
+                    } else {
+                        // 重新配置为H264编解码器
+                        GF_AVCConfig *avc_cfg = gf_odf_avc_cfg_new();
+                        u32 trackId = m_trackId;
+                        err = gf_isom_avc_config_new(m_mp4File, m_trackId, avc_cfg, NULL, NULL, &trackId);
+                        m_trackId = trackId;
+                        gf_odf_avc_cfg_del(avc_cfg);
+                    }
+                    
+                    if (err != GF_OK) {
+                        std::cerr << "Failed to set codec config: " << gf_error_to_string(err) << std::endl;
+                        return false;
+                    }
+                }
+            }
+        }
     }
     
     // 处理参数集
@@ -590,4 +631,27 @@ std::string H264MP4Writer::generateFileName() const
     oss << std::put_time(&tm, "%Y%m%d_%H%M%S.mp4");
     
     return oss.str();
+}
+
+bool H264MP4Writer::detectCodecType(const uint8_t* frameData, size_t frameSize)
+{
+    if (!frameData || frameSize < 4) {
+        return false; // 默认为H264
+    }
+    
+    // 解析NALU
+    std::vector<std::pair<const uint8_t*, size_t>> nalus;
+    if (!parseNALU(frameData, frameSize, nalus) || nalus.empty()) {
+        return false; // 默认为H264
+    }
+    
+    // 检查是否有VPS (只有H265有VPS)
+    for (const auto& nalu : nalus) {
+        uint8_t naluType = (nalu.first[0] & 0x7E) >> 1;
+        if (naluType == 32) { // VPS
+            return true; // 是H265
+        }
+    }
+    
+    return false; // 是H264
 }

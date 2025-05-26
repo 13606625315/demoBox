@@ -28,10 +28,10 @@ public:
      * @param width 视频宽度
      * @param height 视频高度
      * @param frameRate 帧率
-     * @param isH265 是否为H265编码（默认为false，即H264编码）
+     * @param isH265 是否为H265编码（默认为-1，表示自动检测编码类型）
      * @return 是否初始化成功
      */
-    bool init(int width, int height, float frameRate, bool isH265 = false);
+    bool init(int width, int height, float frameRate, int isH265 = -1);
 
     /**
      * 开始录制
@@ -92,6 +92,15 @@ private:
     
     // 生成文件名
     std::string generateFileName() const;
+    
+    /**
+     * 自动检测视频编码类型（H264/H265）
+     * 
+     * @param frameData 帧数据（包含起始码 0x00 0x00 0x00 0x01）
+     * @param frameSize 数据大小
+     * @return 是否为H265编码
+     */
+    bool detectCodecType(const uint8_t* frameData, size_t frameSize);
 
 private:
     int m_width;
