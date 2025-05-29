@@ -166,7 +166,7 @@ typedef struct
     int64_t pts;
     unsigned char* frameBuff;
 }VideoMsg;
-
+void processVideoFile(H264MP4Writer& writer);
 static int32_t read_video_file(const char* path, char** fileBuf, int32_t* fileLen)
 {
     if (path == NULL || fileBuf == NULL || fileLen == NULL)
@@ -179,7 +179,7 @@ static int32_t read_video_file(const char* path, char** fileBuf, int32_t* fileLe
     struct stat st;
     if (stat(path, &st) != 0)
     {
-        ILOGW("%s not exist", path);
+        ILOGW("%s not exist\n", path);
         return -1;
     }
 
@@ -291,8 +291,9 @@ void generateDummyH264Frame(std::vector<uint8_t>& frameData, bool isKeyFrame, in
     }
 }
 
-int main() {
-    std::cout << "H264MP4Writer Demo" << std::endl;
+// 普通MP4录制演示函数
+void normalMP4Demo() {
+    std::cout << "=== 普通MP4录制演示 ===" << std::endl;
     
     // 创建H264MP4Writer实例
     H264MP4Writer writer;
@@ -300,165 +301,228 @@ int main() {
     // 初始化参数 (宽度, 高度, 帧率)
     if (!writer.init(1920, 1080, 25, true)) {
         std::cerr << "Failed to initialize writer" << std::endl;
-        return -1;
+        return;
     }
     
     // 开始录制，文件将保存在指定目录
     if (!writer.startRecording("./videos")) {
         std::cerr << "Failed to start recording" << std::endl;
-        return -1;
+        return;
     }
     
     std::cout << "Recording started. Output file: " << writer.getCurrentFilePath() << std::endl;
-    
-    // // 模拟生成并写入30帧数据（1秒的视频）
-    // const int totalFrames = 30;
-    // for (int i = 0; i < totalFrames; i++) {
-    //     // 每10帧一个关键帧
-    //     bool isKeyFrame = (i % 10 == 0);
-        
-    //     // 生成模拟帧数据
-    //     std::vector<uint8_t> frameData;
-    //     generateDummyH264Frame(frameData, isKeyFrame, i);
-        
-    //     // 写入帧数据
-    //     if (!writer.writeH264Frame(frameData.data(), frameData.size(), isKeyFrame)) {
-    //         std::cerr << "Failed to write frame " << i << std::endl;
-    //         break;
-    //     }
-        
-    //     std::cout << "Wrote frame " << i + 1 << "/" << totalFrames 
-    //               << (isKeyFrame ? " (keyframe)" : "") << std::endl;
-        
-    //     // 模拟帧率延迟
-    //     std::this_thread::sleep_for(std::chrono::milliseconds(33)); // ~30fps
-    // }
-    
     std::cout << "模拟写入H264帧数据..." << std::endl;
     
-
-    {
-        char* fileBuf = NULL;
-        int32_t fileLen = 0;
-        // int32_t freamNo = 0;
-        char path[] = "./v_demo.dav";
-        int32_t ret = read_video_file(path, &fileBuf, &fileLen);
-        if (ret)
-        {
-            ILOGE("[%s] read_video_file err", __func__);
-            usleep(1000 * 1000);
-            return false;
-        }
-        char* pTmpHead = fileBuf;
-    /*
-        [0-3] 44 48 41 56: DHAV
-        [4] FD: I帧
-        [5] 00: 子类型
-        [6] 00: 通道号
-        [7] 00: 子帧序号
-        [8-11] 77 10 00 00: 帧序号
-        [12-15] 5C CF 00 00: 帧长度
-        [16-19] 80 30 59 55: 时间日期
-        [20-21] 57 C0: 绝对时间戳
-        [22] 10: 扩展长度
-        [23] 57: 校验和
-        [24-27] 80 00 F0 87: 扩展 图像尺寸1 1920 x 1080
-        [28-31] 81 32 0C 19: 扩展 回放类型  GOP=50 
-        [32-39] 88 DF 7B F6 56 00 00 00: 数据校验
-
-    */
-
-//#define raw_video_output
-#ifdef raw_video_output
-    // 根据编码类型选择输出文件名
-    const char* outputFileName = "raw.h265";
-    FILE* videoFile = fopen(outputFileName, "ab");
-#endif
-
-        while (1)
-        {
-            if (!(pTmpHead[0] == 'D' && pTmpHead[1] == 'H' && pTmpHead[2] == 'A' && pTmpHead[3] == 'V'))
-            {
-                ILOGE("[%s] invalid frame", __func__);
-                break;
-            }
-            DAHUA_FRAME_HEAD* head = (DAHUA_FRAME_HEAD*)pTmpHead;
-            
-            if (dahua_head_check_sum((char*)head, head->verify) == false)
-            {
-                ILOGE("[%s] dahua_head_check_sum", __func__);
-                break;
-            }
-
-            int32_t data_length = head->frame_len - DHAV_HEAD_LENGTH - DHAV_TAIL_LENGTH - head->expand_len;
-            int32_t data_offset = DHAV_HEAD_LENGTH + head->expand_len;
-            
-            VideoMsg msg = {0};
-            msg.frametype = head->type == I_FRAME_FLAG;
-            msg.usedSize = data_length;
-
-            // imouos_clock_time_t clock_time = {0};
-            // imouos_timeGetEpochClock(&clock_time);
-            // msg.pts = clock_time.sec * 1000 * 1000 + clock_time.nsec / 1000;
-            msg.pts = __get_time_ms();
-            msg.frameBuff = (unsigned char*)(pTmpHead + data_offset);
-
-
-            #ifdef raw_video_output
-                if (videoFile) {
-                    // 检查是否已有起始码
-                    if(!(msg.frameBuff[0] == 0 && msg.frameBuff[1] == 0 && 
-                         msg.frameBuff[2] == 0 && msg.frameBuff[3] == 1)) {
-                        const uint8_t startCode[] = {0x00, 0x00, 0x00, 0x01};
-                        fwrite(startCode, 1, sizeof(startCode), videoFile);
-                        ILOGW("[%s] startCode1", __func__);
-                    }
-                    else
-                    {
-                        //ILOGW("[%s] startCode2", __func__);
-                    }
-                    fwrite(msg.frameBuff, 1, msg.usedSize, videoFile);
-                }
-            #else
-                // 根据编码类型选择写入方法
-                if (!writer.writeH264Frame(msg.frameBuff, msg.usedSize, msg.frametype)) {
-                    std::cerr << "Failed to write frame "<< std::endl;
-                    continue;
-                }
-        
-
-            #endif
-            // 显示进度
-            // if (i % 10 == 0) {
-            //     std::cout << "已写入 " << i << " 帧..." << std::endl;
-            // }
-
-            // ILOGW("[%s] frame_len = %d frame_indx = %d frameBuff=%p frameBuff[3]=0x%x", 
-            //     __func__, head->frame_len, head->frame_indx, msg.frameBuff, msg.frameBuff[3]);
-
-            pTmpHead += head->frame_len;
-
-            //usleep(10 * 1000);
-        }
-
-        if (fileBuf)
-        {
-            free(fileBuf);
-            fileBuf = NULL;
-        }
-#ifdef raw_video_output
-        if (videoFile) 
-        {
-            fclose(videoFile);
-            videoFile = NULL;
-        }
-#endif
-    }
-
+    // 读取并处理视频文件
+    processVideoFile(writer);
+    
     // 停止录制
     writer.stopRecording();
     std::cout << "Recording stopped" << std::endl;
     std::cout << "MP4 file saved to: " << writer.getCurrentFilePath() << std::endl;
+}
+
+// fMP4(分段MP4)录制演示函数
+void fragmentedMP4Demo() {
+    std::cout << "\n=== 分段MP4(fMP4)录制演示 ===" << std::endl;
     
+    // 创建H264MP4Writer实例
+    H264MP4Writer writer;
+    
+    // 初始化分段MP4 (宽度, 高度, 帧率, 是否H265, 输出目录)
+    if (!writer.initFragmentedMP4(1920, 1080, 25, true, "./dash")) {
+        std::cerr << "Failed to initialize fragmented MP4 writer" << std::endl;
+        return;
+    }
+    
+    std::cout << "Fragmented MP4 recording started. Output file: " << writer.getCurrentFilePath() << std::endl;
+    
+    // 设置分段参数 - 每个分段2秒
+    const uint32_t fragmentDuration = 2000; // 2秒，单位毫秒
+    const int framesPerFragment = 50; // 25fps * 2秒 = 50帧
+    int fragmentCount = 0;
+    
+    // 开始第一个分段
+    if (!writer.startFragment(fragmentDuration)) {
+        std::cerr << "Failed to start first fragment" << std::endl;
+        return;
+    }
+    fragmentCount++;
+    std::cout << "Started fragment #" << fragmentCount << std::endl;
+    
+    // 读取并处理视频文件，每50帧创建一个新分段
+    char* fileBuf = NULL;
+    int32_t fileLen = 0;
+    char path[] = "./v_demo.dav";
+    int32_t ret = read_video_file(path, &fileBuf, &fileLen);
+    if (ret) {
+        std::cerr << "Failed to read video file" << std::endl;
+        return;
+    }
+    
+    char* pTmpHead = fileBuf;
+    int frameCounter = 0;
+    
+    while (1) {
+        if (!(pTmpHead[0] == 'D' && pTmpHead[1] == 'H' && pTmpHead[2] == 'A' && pTmpHead[3] == 'V')) {
+            break;
+        }
+        
+        DAHUA_FRAME_HEAD* head = (DAHUA_FRAME_HEAD*)pTmpHead;
+        
+        if (dahua_head_check_sum((char*)head, head->verify) == false) {
+            break;
+        }
+        
+        int32_t data_length = head->frame_len - DHAV_HEAD_LENGTH - DHAV_TAIL_LENGTH - head->expand_len;
+        int32_t data_offset = DHAV_HEAD_LENGTH + head->expand_len;
+        
+        VideoMsg msg = {0};
+        msg.frametype = head->type == I_FRAME_FLAG;
+        msg.usedSize = data_length;
+        msg.pts = __get_time_ms();
+        msg.frameBuff = (unsigned char*)(pTmpHead + data_offset);
+        
+        // 写入帧数据
+        if (!writer.writeFrame(msg.frameBuff, msg.usedSize, msg.frametype)) {
+            std::cerr << "Failed to write frame" << std::endl;
+            continue;
+        }
+        
+        frameCounter++;
+        
+        // 每framesPerFragment帧结束当前分段并开始新分段
+        if (frameCounter % framesPerFragment == 0) {
+            // 结束当前分段
+            if (!writer.endFragment()) {
+                std::cerr << "Failed to end fragment #" << fragmentCount << std::endl;
+            } else {
+                std::cout << "Ended fragment #" << fragmentCount << std::endl;
+            }
+            
+            // 开始新分段
+            if (!writer.startFragment(fragmentDuration)) {
+                std::cerr << "Failed to start fragment #" << (fragmentCount + 1) << std::endl;
+            } else {
+                fragmentCount++;
+                std::cout << "Started fragment #" << fragmentCount << std::endl;
+            }
+        }
+        
+        pTmpHead += head->frame_len;
+        
+        // 限制最多处理5个分段的数据
+        // if (fragmentCount >= 5 && frameCounter % framesPerFragment == 0) {
+        //     break;
+        // }
+    }
+    
+    // 结束最后一个分段
+    if (!writer.endFragment()) {
+        std::cerr << "Failed to end last fragment" << std::endl;
+    } else {
+        std::cout << "Ended last fragment" << std::endl;
+    }
+    
+    // 释放资源
+    if (fileBuf) {
+        free(fileBuf);
+        fileBuf = NULL;
+    }
+    
+    // 停止录制
+    writer.stopRecording();
+    std::cout << "Fragmented MP4 recording stopped" << std::endl;
+    
+    // 生成DASH MPD文件
+    if (!writer.generateMPD("video", 2.0f)) {
+        std::cerr << "Failed to generate MPD file" << std::endl;
+    } else {
+        std::cout << "Generated MPD file at: ./dash/video/manifest.mpd" << std::endl;
+        std::cout << "You can now play this stream using a DASH player" << std::endl;
+    }
+}
+
+// 处理视频文件的函数
+void processVideoFile(H264MP4Writer& writer) {
+    char* fileBuf = NULL;
+    int32_t fileLen = 0;
+    char path[] = "./v_demo.dav";
+    int32_t ret = read_video_file(path, &fileBuf, &fileLen);
+    if (ret) {
+        ILOGE("[%s] read_video_file err", __func__);
+        usleep(1000 * 1000);
+        return;
+    }
+    
+    char* pTmpHead = fileBuf;
+    
+    while (1) {
+        if (!(pTmpHead[0] == 'D' && pTmpHead[1] == 'H' && pTmpHead[2] == 'A' && pTmpHead[3] == 'V')) {
+            ILOGE("[%s] invalid frame", __func__);
+            break;
+        }
+        
+        DAHUA_FRAME_HEAD* head = (DAHUA_FRAME_HEAD*)pTmpHead;
+        
+        if (dahua_head_check_sum((char*)head, head->verify) == false) {
+            ILOGE("[%s] dahua_head_check_sum", __func__);
+            break;
+        }
+        
+        int32_t data_length = head->frame_len - DHAV_HEAD_LENGTH - DHAV_TAIL_LENGTH - head->expand_len;
+        int32_t data_offset = DHAV_HEAD_LENGTH + head->expand_len;
+        
+        VideoMsg msg = {0};
+        msg.frametype = head->type == I_FRAME_FLAG;
+        msg.usedSize = data_length;
+        msg.pts = __get_time_ms();
+        msg.frameBuff = (unsigned char*)(pTmpHead + data_offset);
+        
+        // 写入帧数据
+        if (!writer.writeFrame(msg.frameBuff, msg.usedSize, msg.frametype)) {
+            std::cerr << "Failed to write frame" << std::endl;
+            continue;
+        }
+        
+        pTmpHead += head->frame_len;
+    }
+    
+    if (fileBuf) {
+        free(fileBuf);
+        fileBuf = NULL;
+    }
+}
+
+int main() {
+    std::cout << "H264MP4Writer Demo" << std::endl;
+    
+    // 选择演示模式
+    int choice = 0;
+    std::cout << "请选择演示模式:\n";
+    std::cout << "1. 普通MP4录制\n";
+    std::cout << "2. 分段MP4(fMP4)录制 (用于DASH流媒体)\n";
+    std::cout << "3. 两种模式都演示\n";
+    std::cout << "请输入选择 (1-3): ";
+    std::cin >> choice;
+    
+    switch (choice) {
+        case 1:
+            normalMP4Demo();
+            break;
+        case 2:
+            fragmentedMP4Demo();
+            break;
+        case 3:
+            normalMP4Demo();
+            fragmentedMP4Demo();
+            break;
+        default:
+            std::cout << "无效选择，默认演示普通MP4录制" << std::endl;
+            normalMP4Demo();
+            break;
+    }
+    
+    std::cout << "\n演示完成!" << std::endl;
     return 0;
 }

@@ -52,7 +52,7 @@ writer.startRecording("./videos");
 // frameSize: 数据大小
 // isKeyFrame: 是否是关键帧
 // timestamp: 时间戳（可选）
-writer.writeH264Frame(frameData, frameSize, isKeyFrame);
+writer.writeFrame(frameData, frameSize, isKeyFrame);
 
 // 停止录制
 writer.stopRecording();

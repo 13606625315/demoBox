@@ -1,5 +1,5 @@
 #include "H264MP4Writer.h"
-#include <gpac/isomedia.h>
+#include <gpac/internal/isomedia_dev.h>
 #include <gpac/constants.h>
 #include <gpac/tools.h>
 #include <gpac/mpeg4_odf.h>
@@ -19,6 +19,9 @@ H264MP4Writer::H264MP4Writer()
     , m_trackId(0)
     , m_sampleDuration(0)
     , m_currentDTS(0)
+    , m_isFragmented(false)
+    , m_fragmentCount(0)
+    , m_fragmentDuration(0)
 {
     // 初始化GPAC
     gf_sys_init(GF_MemTrackerNone);
@@ -70,12 +73,22 @@ bool H264MP4Writer::startRecording(const std::string& outputDir)
     m_outputDir = outputDir;
     
     // 使用传统方法检查目录是否存在
+    // 确保输出目录存在
     struct stat st;
     if (stat(outputDir.c_str(), &st) != 0) {
         // 目录不存在，创建目录
         #ifdef _WIN32
-        // Windows平台
-        if (system(("mkdir \"" + outputDir + "\"").c_str()) != 0) {
+        // Windows平台 - 修正Windows下的目录创建命令
+        std::string dirCmd = "mkdir ";
+        // 替换所有的正斜杠为反斜杠
+        std::string winDir = outputDir;
+        for (size_t i = 0; i < winDir.length(); i++) {
+            if (winDir[i] == '/') {
+                winDir[i] = '\\';
+            }
+        }
+        dirCmd += winDir;
+        if (system(dirCmd.c_str()) != 0) {
             std::cerr << "Failed to create output directory: " << outputDir << std::endl;
             return false;
         }
@@ -159,12 +172,25 @@ bool H264MP4Writer::stopRecording()
         return false;
     }
     
-    // GF_Err err = gf_isom_finalize_for_fragment(m_mp4File, 1);
-    // if (err != GF_OK) {
-    //     std::cerr << "Failed to finalize MP4 file: " << gf_error_to_string(err) << std::endl;
-    // }
+    GF_Err err = GF_OK;
     
-    GF_Err err = gf_isom_close(m_mp4File);
+    // 如果是分段MP4，需要特殊处理
+    if (m_isFragmented) {
+        // 结束当前分段
+        if (m_fragmentCount > 0) {
+            err = gf_isom_flush_fragments(m_mp4File, GF_TRUE);
+            if (err != GF_OK) {
+                std::cerr << "Failed to flush fragments: " << gf_error_to_string(err) << std::endl;
+            }
+        }
+        
+        // 完成分段MP4文件
+        err = gf_isom_close(m_mp4File);
+    } else {
+        // 普通MP4文件直接关闭
+        err = gf_isom_close(m_mp4File);
+    }
+    
     if (err != GF_OK) {
         std::cerr << "Failed to close MP4 file: " << gf_error_to_string(err) << std::endl;
     }
@@ -174,6 +200,7 @@ bool H264MP4Writer::stopRecording()
     m_hasParameterSets = false;
     m_avcConfig.reset();
     m_hevcConfig.reset();
+    m_isFragmented = false;
     
     return true;
 }
@@ -247,7 +274,7 @@ bool H264MP4Writer::writeFrame(const uint8_t* frameData, size_t frameSize, bool 
                 // 获取NALU类型 (H265: (nalu[0] & 0x7E) >> 1)
                 
                 uint8_t naluType = (nalu.first[0] & 0x7E) >> 1;
-                std::cout << "naluType = 0x" << std::hex << static_cast<int>(naluType) << std::endl;
+                std::cout << "naluType = " << static_cast<int>(naluType) << std::endl;
                 if (naluType == 32) { // VPS
                     vps = nalu.first;
                     vpsSize = nalu.second;
@@ -381,7 +408,20 @@ bool H264MP4Writer::writeFrame(const uint8_t* frameData, size_t frameSize, bool 
     }
     
     // 添加样本到轨道
-    GF_Err err = gf_isom_add_sample(m_mp4File, m_trackId, 1, &sample);
+    GF_Err err;
+    if (m_isFragmented) {
+        // 使用分段MP4的添加样本方法
+        err = gf_isom_fragment_add_sample(m_mp4File, m_trackId, &sample,
+                                         1, // StreamDescriptionIndex
+                                         m_sampleDuration, // Duration
+                                         0, // PaddingBits
+                                         0, // DegradationPriority
+                                         GF_FALSE); // redundantCoding
+    } else {
+        // 使用普通MP4的添加样本方法
+        err = gf_isom_add_sample(m_mp4File, m_trackId, 1, &sample);
+    }
+    
     if (err != GF_OK) {
         std::cerr << "Failed to add sample: " << gf_error_to_string(err) << std::endl;
         gf_free(sample.data);
@@ -397,6 +437,232 @@ bool H264MP4Writer::writeFrame(const uint8_t* frameData, size_t frameSize, bool 
 std::string H264MP4Writer::getCurrentFilePath() const
 {
     return m_currentFilePath;
+}
+
+bool H264MP4Writer::initFragmentedMP4(int width, int height, float frameRate, int isH265, const std::string& outputDir)
+{
+    if (m_isRecording) {
+        std::cerr << "Already recording" << std::endl;
+        return false;
+    }
+    
+    // 初始化基本参数
+    if (!init(width, height, frameRate, isH265)) {
+        return false;
+    }
+    
+    // 设置分段MP4标志
+    m_isFragmented = true;
+    m_fragmentCount = 0;
+    m_dashOutputDir = outputDir;
+    
+    // 确保输出目录存在
+    struct stat st;
+    if (stat(outputDir.c_str(), &st) != 0) {
+        // 目录不存在，创建目录
+        #ifdef _WIN32
+        // Windows平台
+        if (system(("mkdir \"" + outputDir + "\"").c_str()) != 0) {
+            std::cerr << "Failed to create output directory: " << outputDir << std::endl;
+            return false;
+        }
+        #else
+        // Linux/Unix平台
+        if (system(("mkdir -p \"" + outputDir + "\"").c_str()) != 0) {
+            std::cerr << "Failed to create output directory: " << outputDir << std::endl;
+            return false;
+        }
+        #endif
+    }
+    
+    // 生成文件名
+    m_currentFilePath = outputDir + "/" + generateFileName();
+    
+    // 创建分段MP4文件
+    m_mp4File = gf_isom_open(m_currentFilePath.c_str(), GF_ISOM_OPEN_WRITE, NULL);
+    GF_Err err = m_mp4File ? GF_OK : GF_IO_ERR;
+    if (err != GF_OK) {
+        std::cerr << "Failed to create fragmented MP4 file: " << gf_error_to_string(err) << std::endl;
+        return false;
+    }
+    
+    // 设置为分段模式
+    // 注意：gf_isom_set_fragmented函数在当前GPAC版本中不存在
+    // 我们使用GF_ISOM_WRITE_EDIT标志来创建可编辑的MP4文件，这是分段MP4所必需的
+    // GF_ISOM_OPEN_WRITE和GF_ISOM_WRITE_EDIT是互斥的文件打开模式，不应该通过位运算组合使用
+    /*err = gf_isom_set_fragmented(m_mp4File, 1);*/
+    /*if (err != GF_OK) {
+        std::cerr << "Failed to set fragmented mode: " << gf_error_to_string(err) << std::endl;
+        gf_isom_delete(m_mp4File);
+        m_mp4File = nullptr;
+        return false;
+    }*/
+    
+    // 添加视频轨道
+    m_trackId = gf_isom_new_track(m_mp4File, 0, GF_ISOM_MEDIA_VISUAL, 90000);
+    if (!m_trackId) {
+        std::cerr << "Failed to create video track" << std::endl;
+        gf_isom_delete(m_mp4File);
+        m_mp4File = nullptr;
+        return false;
+    }
+    gf_isom_set_track_enabled(m_mp4File, m_trackId, 1);
+    
+    // 设置编解码器类型
+    if (m_isH265) {
+        // 使用临时空配置，后续会更新
+        GF_HEVCConfig *hevc_cfg = gf_odf_hevc_cfg_new();
+        u32 trackId = m_trackId;
+        err = gf_isom_hevc_config_new(m_mp4File, m_trackId, hevc_cfg, NULL, NULL, &trackId);
+        m_trackId = trackId;
+        gf_odf_hevc_cfg_del(hevc_cfg);
+    } else {
+        // 使用临时空配置，后续会更新
+        GF_AVCConfig *avc_cfg = gf_odf_avc_cfg_new();
+        u32 trackId = m_trackId;
+        err = gf_isom_avc_config_new(m_mp4File, m_trackId, avc_cfg, NULL, NULL, &trackId);
+        m_trackId = trackId;
+        gf_odf_avc_cfg_del(avc_cfg);
+    }
+    
+    if (err != GF_OK) {
+        std::cerr << "Failed to set codec config: " << gf_error_to_string(err) << std::endl;
+        gf_isom_delete(m_mp4File);
+        m_mp4File = nullptr;
+        return false;
+    }
+
+    // 设置视频参数
+    err = gf_isom_set_visual_info(m_mp4File, m_trackId, 1, m_width, m_height);
+    if (err != GF_OK) {
+        std::cerr << "Failed to set visual info: " << gf_error_to_string(err) << std::endl;
+        gf_isom_delete(m_mp4File);
+        m_mp4File = nullptr;
+        return false;
+    }
+    gf_isom_set_sync_table(m_mp4File, m_trackId);
+    if (err != GF_OK) {
+        std::cerr << "Failed gf_isom_set_sync_table: " << gf_error_to_string(err) << std::endl;
+        gf_isom_delete(m_mp4File);
+        m_mp4File = nullptr;
+        return false;
+    }
+    // 准备分段 - 使用正确的参数数量
+    err = gf_isom_setup_track_fragment(m_mp4File, m_trackId, 
+                                      1,  // DefaultStreamDescriptionIndex
+                                      1,  // DefaultSampleDuration
+                                      0,  // DefaultSampleSize
+                                      0,  // DefaultSampleIsSync
+                                      0,  // DefaultSamplePadding
+                                      0); // DefaultDegradationPriority
+    if (err != GF_OK) {
+        std::cerr << "Failed to setup track fragment: " << gf_error_to_string(err) << std::endl;
+        gf_isom_delete(m_mp4File);
+        m_mp4File = nullptr;
+        return false;
+    }
+    
+    // 初始化分段
+    err = gf_isom_finalize_for_fragment(m_mp4File, m_trackId);
+    if (err != GF_OK) {
+        std::cerr << "Failed to finalize for fragment: " << gf_error_to_string(err) << std::endl;
+        gf_isom_delete(m_mp4File);
+        m_mp4File = nullptr;
+        return false;
+    }
+    
+    err = gf_isom_start_segment(m_mp4File,m_currentFilePath.c_str(), GF_TRUE);
+    if (err != GF_OK) {
+        std::cerr << "Failed gf_isom_start_segment: " << gf_error_to_string(err) << std::endl;
+        return false;
+    }
+
+    // 记录开始时间
+    m_startTime = std::chrono::system_clock::now();
+    m_currentDTS = 0;
+    m_isRecording = true;
+    
+    return true;
+}
+
+bool H264MP4Writer::startFragment(uint32_t fragmentDuration)
+{
+    if (!m_isRecording || !m_isFragmented || !m_mp4File) {
+        std::cerr << "Not in fragmented recording mode" << std::endl;
+        return false;
+    }
+    
+    m_fragmentDuration = fragmentDuration;
+    
+    // 开始新的分段
+    GF_Err err = gf_isom_start_fragment(m_mp4File, GF_TRUE);
+    if (err != GF_OK) {
+        std::cerr << "Failed to start fragment: " << gf_error_to_string(err) << std::endl;
+        return false;
+    }
+    
+    // 设置分段持续时间
+    err = gf_isom_set_fragment_reference_time(m_mp4File, m_trackId, m_currentDTS, 0);
+    if (err != GF_OK) {
+        std::cerr << "Failed to set fragment reference time: " << gf_error_to_string(err) << std::endl;
+        return false;
+    }
+    
+    m_fragmentCount++;
+    return true;
+}
+
+bool H264MP4Writer::endFragment()
+{
+    if (!m_isRecording || !m_isFragmented || !m_mp4File) {
+        std::cerr << "Not in fragmented recording mode" << std::endl;
+        return false;
+    }
+    
+    // 结束当前分段
+    GF_Err err = gf_isom_flush_fragments(m_mp4File, GF_TRUE);
+    if (err != GF_OK) {
+        std::cerr << "Failed to flush fragment: " << gf_error_to_string(err) << std::endl;
+        return false;
+    }
+    
+    return true;
+}
+
+bool H264MP4Writer::generateMPD(const std::string& streamName, float segmentDuration)
+{
+
+    
+    // 确保已经停止录制
+    if (m_isRecording) {
+        stopRecording();
+    }
+    
+    // 创建流目录
+    std::string streamDir = m_dashOutputDir + "/" + streamName;
+    struct stat st;
+    if (stat(streamDir.c_str(), &st) != 0) {
+        #ifdef _WIN32
+        system(("mkdir \"" + streamDir + "\" 2>nul").c_str());
+        #else
+        system(("mkdir -p \"" + streamDir + "\"").c_str());
+        #endif
+    }
+    
+    // 使用GPAC的MP4Box工具进行DASH分段
+    std::string cmd = "MP4Box -dash " + std::to_string((int)(segmentDuration * 1000)) +
+                     " -frag " + std::to_string((int)(segmentDuration * 1000)) +
+                     " -rap -segment-name segment_ -out \"" + streamDir + "/manifest.mpd\" \"" +
+                     m_currentFilePath + "\"";
+    
+    std::cout << "Executing command: " << cmd << std::endl;
+    int result = system(cmd.c_str());
+    if (result != 0) {
+        std::cerr << "Failed to segment MP4 file: " << m_currentFilePath << std::endl;
+        return false;
+    }
+    
+    return true;
 }
 
 bool H264MP4Writer::parseNALU(const uint8_t* data, size_t size, std::vector<std::pair<const uint8_t*, size_t>>& nalus)
@@ -494,7 +760,10 @@ bool H264MP4Writer::processH264ParameterSets(const uint8_t* sps, size_t spsSize,
     m_avcConfig->chroma_bit_depth = 8;
     
     // 更新MP4文件的AVC配置
+    u32 flags = m_mp4File->FragmentsFlags;
+    m_mp4File->FragmentsFlags = 0;
     GF_Err err = gf_isom_avc_config_update(m_mp4File, m_trackId, 1, m_avcConfig.get());
+    m_mp4File->FragmentsFlags = flags;
     if (err != GF_OK) {
         std::cerr << "Failed to update AVC config: " << gf_error_to_string(err) << std::endl;
         return false;
@@ -612,7 +881,10 @@ bool H264MP4Writer::processH265ParameterSets(const uint8_t* vps, size_t vpsSize,
     m_hevcConfig->level_idc = 51; // Level 5.1
     
     // 更新MP4文件的HEVC配置
+    u32 flags = m_mp4File->FragmentsFlags;
+    m_mp4File->FragmentsFlags = 0;
     GF_Err err = gf_isom_hevc_config_update(m_mp4File, m_trackId, 1, m_hevcConfig.get());
+    m_mp4File->FragmentsFlags = flags;
     if (err != GF_OK) {
         std::cerr << "Failed to update HEVC config: " << gf_error_to_string(err) << std::endl;
         return false;

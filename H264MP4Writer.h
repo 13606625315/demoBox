@@ -10,6 +10,7 @@
 
 
 #include "gpac/isomedia.h"
+#include "gpac/dash.h"
 
 
 /**
@@ -59,12 +60,6 @@ public:
      */
     bool writeFrame(const uint8_t* frameData, size_t frameSize, bool isKeyFrame, int64_t timestamp = -1);
 
-    /**
-     * 写入H264帧数据（兼容性方法）
-     */
-    bool writeH264Frame(const uint8_t* frameData, size_t frameSize, bool isKeyFrame, int64_t timestamp = -1) {
-        return writeFrame(frameData, frameSize, isKeyFrame, timestamp);
-    }
 
     /**
      * 获取当前文件路径
@@ -79,6 +74,49 @@ public:
      * @return 是否正在录制
      */
     bool isRecording() const { return m_isRecording; }
+
+    /**
+     * 初始化分段MP4（用于DASH流）
+     * 
+     * @param width 视频宽度
+     * @param height 视频高度
+     * @param frameRate 帧率
+     * @param isH265 是否为H265编码（默认为-1，表示自动检测编码类型）
+     * @param outputDir 输出目录
+     * @return 是否初始化成功
+     */
+    bool initFragmentedMP4(int width, int height, float frameRate, int isH265 = -1, const std::string& outputDir = "./dash");
+
+    /**
+     * 开始新的分段
+     * 
+     * @param fragmentDuration 分段时长（毫秒）
+     * @return 是否成功开始分段
+     */
+    bool startFragment(uint32_t fragmentDuration = 1000);
+
+    /**
+     * 结束当前分段
+     * 
+     * @return 是否成功结束分段
+     */
+    bool endFragment();
+
+    /**
+     * 生成DASH MPD文件
+     * 
+     * @param streamName 流名称
+     * @param segmentDuration 分段时长（秒）
+     * @return 是否成功生成MPD文件
+     */
+    bool generateMPD(const std::string& streamName, float segmentDuration = 4.0f);
+    
+    /**
+     * 检查是否为分段MP4模式
+     * 
+     * @return 是否为分段MP4模式
+     */
+    bool isFragmented() const { return m_isFragmented; }
 
 private:
     // 解析NALU数据
@@ -124,6 +162,12 @@ private:
     
     // 记录开始时间
     std::chrono::system_clock::time_point m_startTime;
+    
+    // 分段MP4相关
+    bool m_isFragmented;        // 是否为分段MP4模式
+    std::string m_dashOutputDir; // DASH输出目录
+    int m_fragmentCount;         // 分段计数
+    uint32_t m_fragmentDuration;  // 分段时长（毫秒）
 };
 
 #endif // H264MP4_WRITER_H

@@ -22,15 +22,20 @@ set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(SOURCES
     H264MP4Writer.cpp
     main.cpp
+    DashServer.cpp
 )
 
 # 添加头文件
 set(HEADERS
     H264MP4Writer.h
+    DashServer.h
 )
 
 # 添加可执行文件
 add_executable(mp4demo ${SOURCES} ${HEADERS})
+
+# 添加DASH服务器示例可执行文件
+add_executable(dash_server dash_server_demo.cpp DashServer.cpp ${HEADERS})
 
 # 查找GPAC库
 find_library(GPAC_LIBRARY NAMES gpac_static libgpac_static PATHS ${CMAKE_CURRENT_SOURCE_DIR})
@@ -49,13 +54,22 @@ endif()
 
 # 添加包含目录
 target_include_directories(mp4demo PRIVATE ${GPAC_INCLUDE_DIR})
+target_include_directories(dash_server PRIVATE ${GPAC_INCLUDE_DIR})
 
 # 链接库
 target_link_libraries(mp4demo PRIVATE ${GPAC_LIBRARY})
+target_link_libraries(dash_server PRIVATE ${GPAC_LIBRARY})
 
 # 在Linux上可能需要额外的库
 if(UNIX AND NOT APPLE)
     target_link_libraries(mp4demo PRIVATE pthread dl z)
+    target_link_libraries(dash_server PRIVATE pthread dl z)
+endif()
+
+# 在Windows上需要链接ws2_32库
+if(WIN32)
+    target_link_libraries(mp4demo PRIVATE ws2_32)
+    target_link_libraries(dash_server PRIVATE ws2_32)
 endif()
 
 # 创建videos目录
@@ -63,9 +77,22 @@ add_custom_command(TARGET mp4demo POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/videos
     COMMENT "Creating videos directory")
 
+# 创建dash目录
+add_custom_command(TARGET dash_server POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/dash
+    COMMENT "Creating dash directory")
+
+# 复制player.html到输出目录
+add_custom_command(TARGET dash_server POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    ${CMAKE_CURRENT_SOURCE_DIR}/dash/player.html
+    ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/dash/player.html
+    COMMENT "Copying player.html to output directory")
+
 # 安装目标
-install(TARGETS mp4demo DESTINATION bin)
+install(TARGETS mp4demo dash_server DESTINATION bin)
 install(FILES ${HEADERS} DESTINATION include)
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/dash/player.html DESTINATION share/dash)
 
 # 添加README.md
 file(WRITE ${CMAKE_CURRENT_SOURCE_DIR}/README.md "
@@ -122,7 +149,7 @@ writer.startRecording(\"./videos\");
 // frameSize: 数据大小
 // isKeyFrame: 是否是关键帧
 // timestamp: 时间戳（可选）
-writer.writeH264Frame(frameData, frameSize, isKeyFrame);
+writer.writeFrame(frameData, frameSize, isKeyFrame);
 
 // 停止录制
 writer.stopRecording();
